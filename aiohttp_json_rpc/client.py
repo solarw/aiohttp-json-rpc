@@ -1,19 +1,16 @@
-import aiohttp
 import asyncio
 import logging
 
+import aiohttp
 from yarl import URL
 
 from . import exceptions
-
-from .protocol import (
-    JsonRpcMsgTyp,
-    encode_request,
-    encode_error,
-    decode_error,
-    encode_result,
-    decode_msg,
-)
+from .protocol import decode_error
+from .protocol import decode_msg
+from .protocol import encode_error
+from .protocol import encode_request
+from .protocol import encode_result
+from .protocol import JsonRpcMsgTyp
 
 
 default_logger = logging.getLogger('aiohttp-json-rpc.client')
@@ -65,7 +62,7 @@ class JsonRpcClient:
             try:
                 raw_msg = await self._ws.receive()
 
-                self._logger.debug('#%s: < %s', self._id, raw_msg.data)
+                self._logger.debug('#%s: < %d:  %s', self._id, raw_msg.type, raw_msg.data)
 
                 if raw_msg.type != aiohttp.WSMsgType.text:
                     continue
@@ -208,7 +205,8 @@ class JsonRpcMethod:
     ...     print(await rpc_method1)
     ...     print(await rpc_method1())
     ...     rpc_method2 = JsonRpcMethod(jrpc, 'method2')
-    ...     print(await rpc_method2('arg1', key='arg2'))
+    ...     print(await rpc_method2('arg1', 'arg2'))
+    ...     print(await rpc_method2(arg1='arg1', arg2='arg2'))
     ...     await jrpc.disconnect()
     >>> event_loop.run_until_complete(jrpc_method_coro())
     res1
@@ -232,12 +230,8 @@ class JsonRpcMethod:
 
     @property
     def _await_kwargs(self):
-        return {
-            'params': {
-                'args': self._args,
-                'kwargs': self._kwargs
-            }
-        }
+        assert not (bool(self._args) and bool(self._kwargs)), 'Only named or positional arguments are allowed same time!'
+        return {'params': self._args if self._args else self._kwargs}
 
     def __await__(self):
         return (
@@ -357,6 +351,7 @@ class JsonRpcClientContext:
     ... except StopIteration:
     ...     pass
     """
+    CLIENT_METHODS = ('get_methods', 'get_subscriptions', 'get_topics', 'subscribe', 'unsubscribe')
 
     def __init__(self, rpc_url, rpc_cookies=None):
         self._rpc_client = JsonRpcClient()
@@ -364,6 +359,8 @@ class JsonRpcClientContext:
         self._rpc_cookies = rpc_cookies
 
     def __getattr__(self, rpc_name):
+        if rpc_name in self.CLIENT_METHODS:
+            return getattr(self._rpc_client, rpc_name)
         return JsonRpcMethod(self._rpc_client, rpc_name)
 
     async def __aenter__(self):
