@@ -1,20 +1,22 @@
 import asyncio
-import aiohttp
 import functools
 import importlib
 import logging
 
-from .protocol import JsonRpcMsgTyp, decode_msg, encode_result, encode_error
-from .communicaton import JsonRpcRequest
-from .auth import DummyAuthBackend
+import aiohttp
 
-from .exceptions import (
-    RpcInvalidRequestError,
-    RpcMethodNotFoundError,
-    RpcInvalidParamsError,
-    RpcInternalError,
-    RpcError,
-)
+from .auth import DummyAuthBackend
+from .communicaton import JsonRpcRequest
+from .exceptions import RpcError
+from .exceptions import RpcInternalError
+from .exceptions import RpcInvalidParamsError
+from .exceptions import RpcInvalidRequestError
+from .exceptions import RpcMethodNotFoundError
+from .protocol import decode_msg
+from .protocol import encode_error
+from .protocol import encode_result
+from .protocol import JsonRpcMsgTyp
+from aiohttp_json_rpc.protocol import encode_request
 
 
 class JsonRpc(object):
@@ -24,6 +26,7 @@ class JsonRpc(object):
         self.topics = {}
         self.state = {}
         self.logger = logger or logging.getLogger('aiohttp-json-rpc.server')
+        self.pass_args = False
 
         # auth backend
         if not auth_backend:
@@ -171,8 +174,17 @@ class JsonRpc(object):
                     msg=msg,
                 )
 
-                result = await http_request.methods[msg.data['method']](
-                    json_rpc_request)
+                method = http_request.methods[msg.data['method']]
+
+                if not self.pass_args:
+                    result = await method(json_rpc_request)
+                else:
+                    params = msg.data.get('params', [])
+
+                    if isinstance(params, dict):
+                        result = await method(json_rpc_request, **params)
+                    else:
+                        result = await method(json_rpc_request, *params)
 
                 await http_request.ws.send_str(
                     encode_result(msg.data['id'], result))
@@ -242,7 +254,7 @@ class JsonRpc(object):
         return list(request.subscriptions)
 
     @asyncio.coroutine
-    def subscribe(self, request):
+    def subscribe(self, request, *args, **kwargs):
         if type(request.params) is not list:
             request.params = [request.params]
 
@@ -251,12 +263,12 @@ class JsonRpc(object):
                 request.subscriptions.add(topic)
 
                 if topic in self.state:
-                    request.ws.send_notification(topic, self.state[topic])
+                    yield from self._send_notification(request.ws, topic, self.state[topic])
 
         return list(request.subscriptions)
 
     @asyncio.coroutine
-    def unsubscribe(self, request):
+    def unsubscribe(self, request, *args, **kwargs):
         if type(request.params) is not list:
             request.params = [request.params]
 
@@ -279,7 +291,7 @@ class JsonRpc(object):
             if len(topics & client.subscriptions) > 0:
                 yield client
 
-    def notify(self, topic, data=None):
+    async def notify(self, topic, data=None):
         if type(topic) is not str:
             raise ValueError
 
@@ -288,10 +300,14 @@ class JsonRpc(object):
         for client in self.filter(topic):
             if not client.ws.closed:
                 try:
-                    client.ws.send_notification(topic, data)
+                    await self._send_notification(client.ws, topic, data)
 
                 except Exception as e:
                     self.logger.exception(e)
+
+    async def _send_notification(self, ws, topic, data):
+        msg = encode_request(topic, params=[data])
+        await ws.send_str(msg)
 
 
 def unpack_request_args(original_rpc_method):
